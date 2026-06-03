@@ -1,0 +1,6 @@
+{
+  "name": "Painel de Mensalidades RNC",
+  "description": "Painel financeiro interativo para controle de mensalidades, inadimplência e evolução dos pagamentos do RNC.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
