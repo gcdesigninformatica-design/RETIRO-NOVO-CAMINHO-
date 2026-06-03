@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { 
   Search, 
   FileText, 
@@ -30,6 +30,16 @@ import {
   Key
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { 
+  collection, 
+  onSnapshot, 
+  doc, 
+  setDoc, 
+  deleteDoc, 
+  writeBatch, 
+  serverTimestamp 
+} from "firebase/firestore";
+import { db, handleFirestoreError, OperationType } from "@/lib/firebase";
 
 import { 
   INITIAL_MEMBERS, 
@@ -100,6 +110,16 @@ export default function Home() {
   // User selected months to pay in public search view
   const [userSelectedMonths, setUserSelectedMonths] = useState<Record<string, number[]>>({});
 
+  // Toast helper
+  const showToast = useCallback((message: string, type: "success" | "info" | "error" = "success") => {
+    toastIdCounter++;
+    const id = `toast-${toastIdCounter}`;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4000);
+  }, []);
+
   const handleToggleMonthSelection = (memberName: string, monthIdx: number, allUnpaid: number[]) => {
     const currentSelected = userSelectedMonths[memberName] !== undefined
       ? userSelectedMonths[memberName]
@@ -147,97 +167,130 @@ export default function Home() {
     });
   };
 
-  // 2. Load and Save Persistence
-  useEffect(() => {
-    setTimeout(() => {
-      setMounted(true);
-      try {
-        const saved = localStorage.getItem("rnc_members_database");
-        if (saved) {
-          setMembers(JSON.parse(saved));
-        } else {
-          localStorage.setItem("rnc_members_database", JSON.stringify(INITIAL_MEMBERS));
-          setMembers(INITIAL_MEMBERS);
-        }
+  // 2. Load and Save Persistence (Firebase Cloud Integration)
+  const initializeFirestoreWithDefaults = useCallback(async () => {
+    try {
+      const batch = writeBatch(db);
+      INITIAL_MEMBERS.forEach((membro) => {
+        const docId = membro.nome.replace(/\s+/g, "_").toUpperCase();
+        batch.set(doc(db, "membros", docId), {
+          nome: membro.nome,
+          pagamentos: membro.pagamentos,
+          updatedAt: serverTimestamp()
+        });
+      });
+      await batch.commit();
+      showToast("Banco de associados inicializado na Nuvem!", "success");
+    } catch (e) {
+      console.error("Error seeding Firestore members:", e);
+      handleFirestoreError(e, OperationType.WRITE, "membros_init");
+    }
+  }, [showToast]);
 
-        // Load config states from localStorage or use defaults
-        const savedValor = localStorage.getItem("rnc_valor_mensalidade");
-        if (savedValor) {
-          const v = Number(savedValor);
-          setValorMensalidade(v);
-          setValorMensalidadeInput(v);
-        }
-        
-        const savedSenhaAdmin = localStorage.getItem("rnc_senha_admin");
-        if (savedSenhaAdmin) {
-          setSenhaAdmin(savedSenhaAdmin);
-          setSenhaAdminInput(savedSenhaAdmin);
-        }
-        
-        const savedChavePix = localStorage.getItem("rnc_chave_pix");
-        if (savedChavePix) {
-          setChavePixGeral(savedChavePix);
-          setChavePixInput(savedChavePix);
-        }
-        
-        const savedSenhaMembros = localStorage.getItem("rnc_senha_membros");
-        if (savedSenhaMembros) {
-          setSenhaMembros(savedSenhaMembros);
-          setSenhaMembrosInput(savedSenhaMembros);
-        }
-      } catch (e) {
-        console.error("Error reading from localStorage:", e);
-        setMembers(INITIAL_MEMBERS);
-      }
-      
-      // Set actual current month (June 2026 -> index 5)
-      const today = new Date("2026-06-03T10:47:48Z");
-      setReferenceMonth(today.getMonth()); // 5 for June
-    }, 0);
+  const initializeFirestoreConfig = useCallback(async () => {
+    try {
+      await setDoc(doc(db, "config", "global"), {
+        valorMensalidade: VALOR_MENSALIDADE,
+        senhaAdmin: SENHA_ADMIN,
+        chavePixGeral: CHAVE_PIX_GERAL,
+        senhaMembros: "",
+        updatedAt: serverTimestamp()
+      });
+    } catch (e) {
+      console.error("Error seeding Firestore configs:", e);
+      handleFirestoreError(e, OperationType.WRITE, "config/global_init");
+    }
   }, []);
 
-  const saveDatabase = (updatedList: Membro[]) => {
+  useEffect(() => {
+    // Set actual current month (June 2026 -> index 5)
+    const today = new Date("2026-06-03T10:47:48Z");
+
+    const timer = setTimeout(() => {
+      setReferenceMonth(today.getMonth()); // 5 for June
+      setMounted(true);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+
+    // Listen to membros collection in Firebase
+    const unsubscribeMembros = onSnapshot(
+      collection(db, "membros"),
+      (snapshot) => {
+        if (snapshot.empty) {
+          // Empty DB? Seed with 59 original default members
+          initializeFirestoreWithDefaults();
+        } else {
+          const dbMembers: Membro[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            dbMembers.push({
+              nome: data.nome,
+              pagamentos: data.pagamentos as boolean[]
+            });
+          });
+          // Sort items by name alphabetically
+          dbMembers.sort((a, b) => a.nome.localeCompare(b.nome));
+          setMembers(dbMembers);
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, "membros");
+      }
+    );
+
+    // Listen to systems configuration in Firebase
+    const unsubscribeConfig = onSnapshot(
+      doc(db, "config", "global"),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          setValorMensalidade(data.valorMensalidade);
+          setValorMensalidadeInput(data.valorMensalidade);
+          setSenhaAdmin(data.senhaAdmin);
+          setSenhaAdminInput(data.senhaAdmin);
+          setChavePixGeral(data.chavePixGeral);
+          setChavePixInput(data.chavePixGeral);
+          setSenhaMembros(data.senhaMembros);
+          setSenhaMembrosInput(data.senhaMembros);
+        } else {
+          // Initialize global configuration doc
+          initializeFirestoreConfig();
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, "config/global");
+      }
+    );
+
+    return () => {
+      unsubscribeMembros();
+      unsubscribeConfig();
+    };
+  }, [mounted, initializeFirestoreWithDefaults, initializeFirestoreConfig]);
+
+  const saveSystemConfig = async (
+    newValor: number,
+    newSenhaAdmin: string,
+    newChavePix: string,
+    newSenhaMembros: string
+  ) => {
     try {
-      localStorage.setItem("rnc_members_database", JSON.stringify(updatedList));
-      setMembers(updatedList);
+      await setDoc(doc(db, "config", "global"), {
+        valorMensalidade: newValor,
+        senhaAdmin: newSenhaAdmin,
+        chavePixGeral: newChavePix,
+        senhaMembros: newSenhaMembros,
+        updatedAt: serverTimestamp()
+      });
+      showToast("Configurações salvas na Nuvem!", "success");
     } catch (e) {
-      console.error("Error saving to localStorage:", e);
-      showToast("Erro ao salvar alterações no navegador", "error");
+      console.error("Error saving cloud config:", e);
+      handleFirestoreError(e, OperationType.WRITE, "config/global");
     }
-  };
-
-  const saveSystemConfig = (newValor: number, newSenhaAdmin: string, newChavePix: string, newSenhaMembros: string) => {
-    try {
-      localStorage.setItem("rnc_valor_mensalidade", String(newValor));
-      localStorage.setItem("rnc_senha_admin", newSenhaAdmin);
-      localStorage.setItem("rnc_chave_pix", newChavePix);
-      localStorage.setItem("rnc_senha_membros", newSenhaMembros);
-      
-      setValorMensalidade(newValor);
-      setSenhaAdmin(newSenhaAdmin);
-      setChavePixGeral(newChavePix);
-      setSenhaMembros(newSenhaMembros);
-
-      setValorMensalidadeInput(newValor);
-      setSenhaAdminInput(newSenhaAdmin);
-      setChavePixInput(newChavePix);
-      setSenhaMembrosInput(newSenhaMembros);
-      
-      showToast("Configurações do sistema aplicadas e salvas com sucesso!", "success");
-    } catch (e) {
-      console.error("Error saving config:", e);
-      showToast("Erro ao salvar configurações do sistema", "error");
-    }
-  };
-
-  // Toast helper
-  const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
-    toastIdCounter++;
-    const id = `toast-${toastIdCounter}`;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
   };
 
   // 3. Admin Authentication
@@ -379,8 +432,8 @@ export default function Home() {
     });
   }, [members, searchQuery, statusFilter, selectedMonthFilter, referenceMonth]);
 
-  // 6. Database Action Handlers
-  const togglePaymentItem = (memberIndex: number, monthIndex: number) => {
+  // 6. Database Action Handlers (Firebase Connected)
+  const togglePaymentItem = async (memberIndex: number, monthIndex: number) => {
     const member = members[memberIndex];
     if (activeSubdomain === "consulta") {
       if (!member.pagamentos[monthIndex]) {
@@ -401,56 +454,83 @@ export default function Home() {
       return;
     }
     
-    const newList = [...members];
-    newList[memberIndex].pagamentos[monthIndex] = !newList[memberIndex].pagamentos[monthIndex];
-    saveDatabase(newList);
-    showToast(`Mensalidade de ${MESES_CURTOS[monthIndex]} alterada para ${newList[memberIndex].pagamentos[monthIndex] ? "PAGA" : "PENDENTE"}`, "success");
-  };
-
-  const quitMembroDebitoTotal = (memberIndex: number) => {
-    const newList = [...members];
-    const member = newList[memberIndex];
-    
-    // Mark all months up to December as true
-    for (let i = 0; i < 12; i++) {
-      member.pagamentos[i] = true;
+    try {
+      const newPagamentos = [...member.pagamentos];
+      newPagamentos[monthIndex] = !newPagamentos[monthIndex];
+      const docId = member.nome.replace(/\s+/g, "_").toUpperCase();
+      
+      await setDoc(doc(db, "membros", docId), {
+        nome: member.nome,
+        pagamentos: newPagamentos,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      
+      showToast(`Mensalidade de ${MESES_CURTOS[monthIndex]} de ${member.nome} alterada!`, "success");
+    } catch (error) {
+      console.error("Error toggling payment:", error);
+      handleFirestoreError(error, OperationType.WRITE, `membros/${member.nome}`);
     }
-    
-    saveDatabase(newList);
-    showToast(`Todas as mensalidades de ${member.nome} foram liquidadas com sucesso!`, "success");
   };
 
-  const handleCreateMember = (e: React.FormEvent) => {
+  const quitMembroDebitoTotal = async (memberIndex: number) => {
+    const member = members[memberIndex];
+    try {
+      const allPaid = Array(12).fill(true);
+      const docId = member.nome.replace(/\s+/g, "_").toUpperCase();
+      
+      await setDoc(doc(db, "membros", docId), {
+        nome: member.nome,
+        pagamentos: allPaid,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      
+      showToast(`Todas as mensalidades de ${member.nome} foram liquidadas na Nuvem!`, "success");
+    } catch (error) {
+      console.error("Error quitting total debt:", error);
+      handleFirestoreError(error, OperationType.WRITE, `membros/${member.nome}`);
+    }
+  };
+
+  const handleCreateMember = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMemberName.trim()) {
       showToast("O nome do membro não pode estar vazio", "error");
       return;
     }
 
-    const exists = members.some(m => m.nome.toUpperCase() === newMemberName.trim().toUpperCase());
+    const cleanName = newMemberName.trim().toUpperCase();
+    const exists = members.some(m => m.nome.toUpperCase() === cleanName);
     if (exists) {
       showToast("Já existe um membro registrado com esse nome", "error");
       return;
     }
 
-    // Default: first two months paid
-    const newMembro: Membro = {
-      nome: newMemberName.trim().toUpperCase(),
-      pagamentos: [true, true, false, false, false, false, false, false, false, false, false, false]
-    };
-
-    const newList = [newMembro, ...members];
-    saveDatabase(newList);
-    setNewMemberName("");
-    showToast(`Membro registrado com sucesso: ${newMembro.nome}`, "success");
+    try {
+      const docId = cleanName.replace(/\s+/g, "_");
+      await setDoc(doc(db, "membros", docId), {
+        nome: cleanName,
+        pagamentos: [true, true, false, false, false, false, false, false, false, false, false, false],
+        updatedAt: serverTimestamp()
+      });
+      setNewMemberName("");
+      showToast(`Membro registrado com sucesso: ${cleanName}`, "success");
+    } catch (error) {
+      console.error("Error creating member:", error);
+      handleFirestoreError(error, OperationType.WRITE, `membros/${cleanName}`);
+    }
   };
 
-  const handleDeleteMember = (index: number) => {
+  const handleDeleteMember = async (index: number) => {
     const member = members[index];
     if (confirm(`Tem certeza que deseja descredenciar ${member.nome}? Esta ação é irreversível.`)) {
-      const newList = members.filter((_, idx) => idx !== index);
-      saveDatabase(newList);
-      showToast(`Membro ${member.nome} foi desregistrado`, "info");
+      try {
+         const docId = member.nome.replace(/\s+/g, "_").toUpperCase();
+         await deleteDoc(doc(db, "membros", docId));
+         showToast(`Membro ${member.nome} foi desregistrado`, "info");
+      } catch (error) {
+         console.error("Error deleting member:", error);
+         handleFirestoreError(error, OperationType.WRITE, `membros/${member.nome}`);
+      }
     }
   };
 
@@ -458,26 +538,58 @@ export default function Home() {
     setEditingMember({ index, name: currentName });
   };
 
-  const submitEditMember = () => {
+  const submitEditMember = async () => {
     if (!editingMember) return;
-    if (!editingMember.name.trim()) {
+    const cleanNewName = editingMember.name.trim().toUpperCase();
+    if (!cleanNewName) {
       showToast("O nome não pode estar em branco", "error");
       return;
     }
 
-    const newList = [...members];
-    const oldName = newList[editingMember.index].nome;
-    newList[editingMember.index].nome = editingMember.name.trim().toUpperCase();
-    saveDatabase(newList);
-    showToast(`Membro alterado de ${oldName} para ${newList[editingMember.index].nome}`, "success");
-    setEditingMember(null);
+    const oldMember = members[editingMember.index];
+    const oldDocId = oldMember.nome.replace(/\s+/g, "_").toUpperCase();
+    const newDocId = cleanNewName.replace(/\s+/g, "_").toUpperCase();
+
+    try {
+      if (oldDocId !== newDocId) {
+        // Create matching member with new ID, and delete old one to stay organized
+        await setDoc(doc(db, "membros", newDocId), {
+          nome: cleanNewName,
+          pagamentos: oldMember.pagamentos,
+          updatedAt: serverTimestamp()
+        });
+        await deleteDoc(doc(db, "membros", oldDocId));
+      } else {
+        await setDoc(doc(db, "membros", oldDocId), {
+          nome: cleanNewName,
+          pagamentos: oldMember.pagamentos,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+      showToast(`Membro alterado de ${oldMember.nome} para ${cleanNewName}`, "success");
+      setEditingMember(null);
+    } catch (error) {
+      console.error("Error editing member name:", error);
+      handleFirestoreError(error, OperationType.WRITE, `membros/${oldMember.nome}`);
+    }
   };
 
-  const resetToFactoryData = () => {
-    if (confirm("Deseja apagar todas as alterações do localstorage e restaurar a planilha original de 59 membros?")) {
-      localStorage.setItem("rnc_members_database", JSON.stringify(INITIAL_MEMBERS));
-      setMembers(INITIAL_MEMBERS);
-      showToast("Base original reestabelecida com sucesso", "success");
+  const resetToFactoryData = async () => {
+    if (confirm("Deseja apagar todas as alterações da Nuvem e restaurar a planilha original de 59 membros?")) {
+      try {
+        const batchDelete = writeBatch(db);
+        members.forEach((m) => {
+          const docId = m.nome.replace(/\s+/g, "_").toUpperCase();
+          batchDelete.delete(doc(db, "membros", docId));
+        });
+        await batchDelete.commit();
+        
+        await initializeFirestoreWithDefaults();
+        showToast("Nuvem reestabelecida com sucesso!", "success");
+      } catch (e) {
+        console.error("Error resetting Cloud DB:", e);
+        handleFirestoreError(e, OperationType.WRITE, "membros_reset");
+      }
     }
   };
 

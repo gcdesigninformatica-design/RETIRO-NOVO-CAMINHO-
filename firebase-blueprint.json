@@ -1,0 +1,64 @@
+{
+  "entities": {
+    "Membro": {
+      "title": "Membro",
+      "description": "Dados de associados e seus estados de pagamento por mes",
+      "type": "object",
+      "properties": {
+        "nome": {
+          "type": "string",
+          "description": "Nome completo do associado em letras maiusculas"
+        },
+        "pagamentos": {
+          "type": "array",
+          "description": "Sequencia de 12 valores booleanos representando o pagamento de cada mes do ano"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date",
+          "description": "Data de ultima modificacao do membro"
+        }
+      },
+      "required": ["nome", "pagamentos"]
+    },
+    "Configuracao": {
+      "title": "Configuracao",
+      "description": "Parametros e configuracoes gerais do portal administrativo",
+      "type": "object",
+      "properties": {
+        "valorMensalidade": {
+          "type": "number",
+          "description": "Preco e custo de mensalidades por associado"
+        },
+        "senhaAdmin": {
+          "type": "string",
+          "description": "Senha para autenticacao no controle administrador"
+        },
+        "chavePixGeral": {
+          "type": "string",
+          "description": "Codigo de chave Pix principal"
+        },
+        "senhaMembros": {
+          "type": "string",
+          "description": "Senha geral opcional para acesso regular"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date",
+          "description": "Data de ultima alteracao de configuracao"
+        }
+      },
+      "required": ["valorMensalidade", "senhaAdmin", "chavePixGeral", "senhaMembros"]
+    }
+  },
+  "firestore": {
+    "/membros/{membroId}": {
+      "schema": "#/entities/Membro",
+      "description": "Colecao de membros associados registradas no sistema"
+    },
+    "/config/{configId}": {
+      "schema": "#/entities/Configuracao",
+      "description": "Colecao para parametros globais do portal admin e segurancas"
+    }
+  }
+}
